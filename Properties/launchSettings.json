@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "HeadlessMinecraftControl (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "HeadlessMinecraftControl (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
