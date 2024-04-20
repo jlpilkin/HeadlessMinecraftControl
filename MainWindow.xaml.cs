@@ -74,15 +74,24 @@ namespace HeadlessMinecraftControl
         private CancellationTokenSource _taskDownloadResourcePackToken = null;
         private Task _taskInGameTimeout = null;
         private CancellationTokenSource _taskInGameTimeoutToken = null;
+        private Task _taskStartToInGameTimeoutSeconds = null;
+        private CancellationTokenSource _taskStartToInGameTimeoutToken = null;
         private string _processTextUIUpdate = string.Empty;
+        private int _uiUpdateFrequencyMs = 10;
         private object _lock = new object();
         private object _uiUpdateLock = new object();
         private object _downloadResourcePackLock = new object();
         private object _inGameTimeoutLock = new object();
+        private object _startToInGameTimeoutLock = new object();
+        private object _isRunningLock = new object();
 
         public MainWindow()
         {
             this.InitializeComponent();
+            if (!int.TryParse(ConfigurationManager.AppSettings["uiUpdateFrequencyMs"], out _uiUpdateFrequencyMs))
+            {
+                _uiUpdateFrequencyMs = 10;
+            }
             launchRelaunch();
         }
 
@@ -102,7 +111,12 @@ namespace HeadlessMinecraftControl
 
         private void sendCommand_Click(object sender, RoutedEventArgs e)
         {
-            if (_isRunning && !string.IsNullOrWhiteSpace(commandText.Text))
+            bool isRunning = false;
+            lock (_isRunningLock)
+            {
+                isRunning = _isRunning;
+            }
+            if (isRunning && !string.IsNullOrWhiteSpace(commandText.Text))
             {
                 if (!_process.HasExited)
                 {
@@ -126,11 +140,14 @@ namespace HeadlessMinecraftControl
                 }
                 else
                 {
-                    _isRunning = false;
+                    lock (_isRunningLock)
+                    {
+                        _isRunning = false;
+                    }
                     launchRelaunch();
                 }
             }
-            else if (!_isRunning && !string.IsNullOrWhiteSpace(commandText.Text))
+            else if (!isRunning && !string.IsNullOrWhiteSpace(commandText.Text))
             {
                 launchRelaunch();
             }
@@ -156,7 +173,42 @@ namespace HeadlessMinecraftControl
 
         private void launchRelaunch()
         {
+            lock (_downloadResourcePackLock)
+            {
+                if (_taskDownloadResourcePackToken != null)
+                {
+                    _taskDownloadResourcePackToken.Cancel();
+                }
+            }
+
+            lock (_inGameTimeoutLock)
+            {
+                if (_taskInGameTimeoutToken != null)
+                {
+                    _taskInGameTimeoutToken.Cancel();
+                }
+            }
+
+            lock (_startToInGameTimeoutLock)
+            {
+                if (_taskStartToInGameTimeoutToken != null)
+                {
+                    _taskStartToInGameTimeoutToken.Cancel();
+                    Thread.Sleep(5000);
+                }
+            }
+
+            lock (_startToInGameTimeoutLock)
+            {
+                if (_taskStartToInGameTimeoutSeconds == null)
+                {
+                    _taskStartToInGameTimeoutToken = new CancellationTokenSource();
+                    _taskStartToInGameTimeoutSeconds = StartToInGameTimeoutAsync(_taskStartToInGameTimeoutToken.Token);
+                }
+            }
+
             closeProcess();
+
             _process = new Process();
             _process.StartInfo.FileName = ConfigurationManager.AppSettings["cmdPath"];
             _process.StartInfo.ArgumentList.Add("/C");
@@ -170,38 +222,49 @@ namespace HeadlessMinecraftControl
             _process.StartInfo.WorkingDirectory = Environment.ExpandEnvironmentVariables(ConfigurationManager.AppSettings["workingDirectory"]);
             _process.OutputDataReceived += (s, e) =>
             {
-                lock (_lock)
+                bool isRunning = false;
+                lock (_isRunningLock)
                 {
-                    _processLines.Add(e.Data);
-                    if (_processLines.Count > 1000)
+                    isRunning = _isRunning;
+                }
+                if (isRunning)
+                {
+                    lock (_lock)
                     {
-                        _processLines.RemoveRange(0, _processLines.Count - 1000);
+                        _processLines.Add(e.Data);
+                        if (_processLines.Count > 1000)
+                        {
+                            _processLines.RemoveRange(0, _processLines.Count - 1000);
+                        }
                     }
-                }
-                lock (_uiUpdateLock)
-                {
-                    _processTextUIUpdate += e.Data + Environment.NewLine;
-                }
-                if ((DateTime.Now - _lastUIUpdate).TotalMilliseconds > 10)
-                {
-                    string processTextUIUpdate = string.Empty;
                     lock (_uiUpdateLock)
                     {
-                        processTextUIUpdate = _processTextUIUpdate;
-                        _processTextUIUpdate = string.Empty;
+                        _processTextUIUpdate += e.Data + Environment.NewLine;
                     }
-                    this.DispatcherQueue.TryEnqueue(() =>
+                    if ((DateTime.Now - _lastUIUpdate).TotalMilliseconds > _uiUpdateFrequencyMs)
                     {
-                        processConsole.Text += processTextUIUpdate;
-                        ScrollToBottom(processConsole);
-                    });
-                    _lastUIUpdate = DateTime.Now;
+                        string processTextUIUpdate = string.Empty;
+                        lock (_uiUpdateLock)
+                        {
+                            processTextUIUpdate = _processTextUIUpdate;
+                            _processTextUIUpdate = string.Empty;
+                        }
+                        this.DispatcherQueue.TryEnqueue(() =>
+                        {
+                            processConsole.Text += processTextUIUpdate;
+                            ScrollToBottom(processConsole);
+                        });
+                        _lastUIUpdate = DateTime.Now;
+                    }
+                    processConsoleText();
                 }
-                processConsoleText();
             };
             _process.Start();
             _process.BeginOutputReadLine();
-            _isRunning = true;
+            lock (_isRunningLock)
+            {
+                _isRunning = true;
+            }
             this.DispatcherQueue.TryEnqueue(() =>
             {
                 startRestart.Content = "Restart";
@@ -211,7 +274,12 @@ namespace HeadlessMinecraftControl
 
         private void closeProcess()
         {
-            if (_isRunning)
+            bool isRunning = false;
+            lock (_isRunningLock)
+            {
+                isRunning = _isRunning;
+            }
+            if (isRunning)
             {
                 if (_minecraftWindow != IntPtr.Zero)
                 {
@@ -221,9 +289,29 @@ namespace HeadlessMinecraftControl
                 }
 
                 sendProcessCommand("exit");
-                _process.WaitForExit(10000);
-                _process.Kill();
-                _isRunning = false;
+
+                if (_minecraftProcess != null)
+                {
+                    _minecraftProcess.WaitForExit(10000);
+                    _minecraftProcess.Kill();
+                }
+
+                if (_headlessMcProcess != null)
+                {
+                    _headlessMcProcess.WaitForExit(10000);
+                    _headlessMcProcess.Kill();
+                }
+
+                if (_process != null)
+                {
+                    _process.WaitForExit(10000);
+                    _process.Kill();
+                }
+
+                lock (_isRunningLock)
+                {
+                    _isRunning = false;
+                }
                 this.DispatcherQueue.TryEnqueue(() =>
                 {
                     startRestart.Content = "Start";
@@ -232,6 +320,7 @@ namespace HeadlessMinecraftControl
                 _state = MinecraftState.Stopped;
                 _headlessMcProcess = null;
                 _minecraftProcess = null;
+                _process = null;
                 _minecraftInstanceId = null;
                 _minecraftUser = null;
                 _minecraftWindow = new IntPtr(0);
@@ -245,7 +334,12 @@ namespace HeadlessMinecraftControl
 
         private void sendProcessCommand(string command)
         {
-            if (_isRunning && !string.IsNullOrWhiteSpace(command))
+            bool isRunning = false;
+            lock (_isRunningLock)
+            {
+                isRunning = _isRunning;
+            }
+            if (isRunning && !string.IsNullOrWhiteSpace(command))
             {
                 if (!_process.HasExited)
                 {
@@ -514,6 +608,14 @@ namespace HeadlessMinecraftControl
                                 }
                             }
 
+                            lock (_startToInGameTimeoutLock)
+                            {
+                                if (_taskStartToInGameTimeoutToken != null)
+                                {
+                                    _taskStartToInGameTimeoutToken.Cancel();
+                                }
+                            }
+
                             _state = MinecraftState.InGame;
                         }
                         break;
@@ -627,6 +729,37 @@ namespace HeadlessMinecraftControl
                 {
                     _taskInGameTimeout = null;
                     _taskInGameTimeoutToken = null;
+                }
+            }
+        }
+
+        private async Task StartToInGameTimeoutAsync(CancellationToken token)
+        {
+            try
+            {
+                int startToInGameTimeoutSeconds = 10;
+                if (!int.TryParse(ConfigurationManager.AppSettings["startToInGameTimeoutSeconds"], out startToInGameTimeoutSeconds))
+                {
+                    startToInGameTimeoutSeconds = 10;
+                }
+                startToInGameTimeoutSeconds = startToInGameTimeoutSeconds * 1000;
+                await Task.Delay(startToInGameTimeoutSeconds, token);
+                if (!token.IsCancellationRequested)
+                {
+                    _state = MinecraftState.Failed;
+                    launchRelaunch();
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                // Task was cancelled
+            }
+            finally
+            {
+                lock (_startToInGameTimeoutLock)
+                {
+                    _taskStartToInGameTimeoutSeconds = null;
+                    _taskStartToInGameTimeoutToken = null;
                 }
             }
         }
