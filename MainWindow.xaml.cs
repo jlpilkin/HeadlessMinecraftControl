@@ -220,45 +220,7 @@ namespace HeadlessMinecraftControl
             _process.StartInfo.RedirectStandardInput = true;
             _process.StartInfo.CreateNoWindow = true;
             _process.StartInfo.WorkingDirectory = Environment.ExpandEnvironmentVariables(ConfigurationManager.AppSettings["workingDirectory"]);
-            _process.OutputDataReceived += (s, e) =>
-            {
-                bool isRunning = false;
-                lock (_isRunningLock)
-                {
-                    isRunning = _isRunning;
-                }
-                if (isRunning)
-                {
-                    lock (_lock)
-                    {
-                        _processLines.Add(e.Data);
-                        if (_processLines.Count > 1000)
-                        {
-                            _processLines.RemoveRange(0, _processLines.Count - 1000);
-                        }
-                    }
-                    lock (_uiUpdateLock)
-                    {
-                        _processTextUIUpdate += e.Data + Environment.NewLine;
-                    }
-                    if ((DateTime.Now - _lastUIUpdate).TotalMilliseconds > _uiUpdateFrequencyMs)
-                    {
-                        string processTextUIUpdate = string.Empty;
-                        lock (_uiUpdateLock)
-                        {
-                            processTextUIUpdate = _processTextUIUpdate;
-                            _processTextUIUpdate = string.Empty;
-                        }
-                        this.DispatcherQueue.TryEnqueue(() =>
-                        {
-                            processConsole.Text += processTextUIUpdate;
-                            ScrollToBottom(processConsole);
-                        });
-                        _lastUIUpdate = DateTime.Now;
-                    }
-                    processConsoleText();
-                }
-            };
+            _process.OutputDataReceived += ProcessOutputReceived;
             _process.Start();
             _process.BeginOutputReadLine();
             lock (_isRunningLock)
@@ -270,6 +232,46 @@ namespace HeadlessMinecraftControl
                 startRestart.Content = "Restart";
             });
             _state = MinecraftState.Starting;
+        }
+
+        private void ProcessOutputReceived(object s, DataReceivedEventArgs e)
+        {
+            bool isRunning = false;
+            lock (_isRunningLock)
+            {
+                isRunning = _isRunning;
+            }
+            if (isRunning)
+            {
+                lock (_lock)
+                {
+                    _processLines.Add(e.Data);
+                    if (_processLines.Count > 1000)
+                    {
+                        _processLines.RemoveRange(0, _processLines.Count - 1000);
+                    }
+                }
+                lock (_uiUpdateLock)
+                {
+                    _processTextUIUpdate += e.Data + Environment.NewLine;
+                }
+                if ((DateTime.Now - _lastUIUpdate).TotalMilliseconds > _uiUpdateFrequencyMs)
+                {
+                    string processTextUIUpdate = string.Empty;
+                    lock (_uiUpdateLock)
+                    {
+                        processTextUIUpdate = _processTextUIUpdate;
+                        _processTextUIUpdate = string.Empty;
+                    }
+                    this.DispatcherQueue.TryEnqueue(() =>
+                    {
+                        processConsole.Text += processTextUIUpdate;
+                        ScrollToBottom(processConsole);
+                    });
+                    _lastUIUpdate = DateTime.Now;
+                }
+                processConsoleText();
+            }
         }
 
         private void closeProcess()
@@ -622,9 +624,14 @@ namespace HeadlessMinecraftControl
 
                     case MinecraftState.InGame:
                         string inGameStopRegex = "^\\[\\d+:\\d+:\\d+\\] \\[Render thread/INFO\\]: Stopping worker threads\\s*$";
-                        string inGameDisconnectRegex = "^\\[\\d+:\\d+:\\d+\\] \\[Render thread/WARN\\]: Client disconnected with reason: Server closed\\s*$";
+                        string inGameServerClosedRegex = "^\\[\\d+:\\d+:\\d+\\] \\[Render thread/WARN\\]: Client disconnected with reason: Server closed\\s*$";
+                        string inGameDisconnectRegex = "^\\[\\d+:\\d+:\\d+\\] \\[Render thread/WARN\\]: Client disconnected with reason: Disconnected\\s*$";
+                        string inGameShuttingDownRegex = "^\\[\\d+:\\d+:\\d+\\] \\[Render thread/INFO\\]: \\[CHAT\\] \\[Rcon\\] Shutting down now!\\s*$";
 
-                        if (System.Text.RegularExpressions.Regex.IsMatch(processLine, inGameStopRegex) || System.Text.RegularExpressions.Regex.IsMatch(processLine, inGameDisconnectRegex))
+                        if (System.Text.RegularExpressions.Regex.IsMatch(processLine, inGameStopRegex)
+                            || System.Text.RegularExpressions.Regex.IsMatch(processLine, inGameServerClosedRegex)
+                            || System.Text.RegularExpressions.Regex.IsMatch(processLine, inGameDisconnectRegex)
+                            || System.Text.RegularExpressions.Regex.IsMatch(processLine, inGameShuttingDownRegex))
                         {
                             _state = MinecraftState.Disconnected;
                             sendProcessCommand("click 2");
